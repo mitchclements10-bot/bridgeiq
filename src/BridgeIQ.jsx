@@ -239,30 +239,87 @@ Return:
 }`;
 }
 
+const REVENUE_SYS = `You are BridgeIQ, a strategic advisor for entertainment executives evaluating creator-legacy media partnerships.
+
+Your task is to analyze the advertising and revenue unlock potential of a proposed creator-legacy partnership — specifically the net new ad inventory, brand fit, and revenue range it could create.
+
+Be concrete and directional. Use CPM and impressions language only where it supports a business case, not as a primary framing. Think like a head of ad sales or a media buyer, not a digital marketer.
+
+NEVER use: influencer campaign, conversion funnel, audience acquisition, engagement optimization, KPI dashboard.
+
+Respond ONLY with valid JSON. No markdown fences.`;
+
+function buildRevenuePrompt(profile, studioCtx, total, arch) {
+  return `Analyze the advertising and revenue unlock potential of this creator-legacy partnership:
+
+CREATOR: ${profile.creatorName} | ${profile.category} | ${profile.platforms} | ${profile.audienceSize}
+Audience: ${profile.audienceDemo}
+Monetization history: ${profile.monetization}
+Brand history: ${profile.brandHistory}
+Content style: ${profile.contentStyle}
+
+STUDIO: ${studioCtx.companyName} (${studioCtx.companyType})
+Objective: ${studioCtx.objective}
+Project: ${studioCtx.projectDesc}
+Deal type: ${studioCtx.dealType} | Revenue model: ${studioCtx.revenueModel}
+
+BRIDGE SCORE: ${total}/100 | CLASSIFICATION: ${arch.label}
+
+Return this exact JSON:
+{
+  "inventorySummary": "2-3 sentences: What net new ad-sellable inventory does this partnership create that neither side has today?",
+  "contentFormats": ["Format 1 with estimated output (e.g., '12-episode digital series, ~8 min avg')", "Format 2", "Format 3"],
+  "estimatedImpressions": "Directional impressions range across all formats combined (e.g., '180M–320M total impressions annually')",
+  "brandCategories": [
+    {"category": "Category name", "rationale": "Why this category fits this specific partnership", "fit": "strong"},
+    {"category": "Category name", "rationale": "Brief rationale", "fit": "moderate"},
+    {"category": "Category name", "rationale": "Brief rationale", "fit": "strong"},
+    {"category": "Category name", "rationale": "Brief rationale", "fit": "moderate"},
+    {"category": "Category name", "rationale": "Brief rationale", "fit": "weak"}
+  ],
+  "revenueRangeLow": "Dollar figure (e.g., '$4.2M')",
+  "revenueRangeHigh": "Dollar figure (e.g., '$9.8M')",
+  "revenueMethodology": "1-2 sentences explaining the basis for the range (audience size, CPM tier, content volume, deal structure)",
+  "inventoryContext": "1-2 sentences: Why this inventory is valuable or differentiated vs. what the studio already sells",
+  "agencyAngle": "1-2 sentences: How an agency buyer like Publicis or GroupM should think about this inventory — what client problems does it solve?"
+}`;
+}
+
 /* ================================================================
    API HELPER
    ================================================================ */
 
 async function callClaude(system, userMsg) {
-  const resp = await fetch("/api/bridge", {
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, userMessage: userMsg, useSearch: true })
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4000,
+      system,
+      tools: [{ type: "web_search_20250305", name: "web_search" }],
+      messages: [{ role: "user", content: userMsg }]
+    })
   });
   const data = await resp.json();
-  if (data.error) throw new Error(data.error);
-  return data.text;
+  const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  return text;
 }
 
 async function callClaudeNoSearch(system, userMsg) {
-  const resp = await fetch("/api/bridge", {
+  const resp = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ system, userMessage: userMsg, useSearch: false })
+    body: JSON.stringify({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 4000,
+      system,
+      messages: [{ role: "user", content: userMsg }]
+    })
   });
   const data = await resp.json();
-  if (data.error) throw new Error(data.error);
-  return data.text;
+  const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  return text;
 }
 
 function parseJSON(text) {
@@ -272,6 +329,170 @@ function parseJSON(text) {
   const end = cleaned.lastIndexOf("}");
   if (start === -1 || end === -1) throw new Error("No JSON found");
   return JSON.parse(cleaned.slice(start, end + 1));
+}
+
+function generatePDF(profile, studioCtx, result, analysis, revenueUnlock) {
+  const { total, archetype: ac, dimScores, risks } = result;
+  const date = new Date().toLocaleDateString("en-US", { year:"numeric", month:"long", day:"numeric" });
+  const scoreColor = total >= 75 ? "#00A882" : total >= 55 ? "#CC8C00" : total >= 40 ? "#CC6A00" : "#CC2244";
+
+  const dimRows = DIMS.map((d, i) => {
+    const ds = dimScores[i];
+    const pct = Math.round((ds?.pct || 0) * 100);
+    const barColor = pct >= 70 ? "#00A882" : pct >= 50 ? "#CC8C00" : "#CC2244";
+    return `<tr>
+      <td style="padding:8px 6px;border-bottom:1px solid #eee;font-size:13px">${d.label}</td>
+      <td style="padding:8px 6px;border-bottom:1px solid #eee;text-align:center;font-size:13px;font-weight:600;color:${barColor}">${ds?.scaled?.toFixed(1) || 0}/${d.max}</td>
+      <td style="padding:8px 6px;border-bottom:1px solid #eee;width:120px">
+        <div style="height:6px;border-radius:3px;background:#eee"><div style="height:6px;border-radius:3px;background:${barColor};width:${pct}%"></div></div>
+      </td>
+      <td style="padding:8px 6px;border-bottom:1px solid #eee;text-align:right;font-size:12px;color:#888">${pct}%</td>
+    </tr>`;
+  }).join("");
+
+  const sevColor = { critical:"#CC2244", high:"#CC8C00", moderate:"#2266CC" };
+  const riskHtml = risks.length === 0 ? "<p style='color:#888;font-size:13px'>No risk flags triggered.</p>" :
+    risks.map(r => `<div style="margin-bottom:10px;padding:12px 14px;border-left:3px solid ${sevColor[r.severity]||"#888"};background:#fafafa;border-radius:0 6px 6px 0">
+      <div style="font-size:13px;font-weight:700;color:${sevColor[r.severity]||"#333"};margin-bottom:3px">${r.title} <span style="font-size:11px;font-weight:500;text-transform:uppercase;letter-spacing:.04em">[${r.severity}]</span></div>
+      <div style="font-size:12.5px;color:#555;line-height:1.6">${r.text}</div>
+    </div>`).join("");
+
+  const analysisHtml = analysis ? [
+    { label:"Bridge Analysis", content: analysis.bridgeAnalysis },
+    { label:"Primary Structural Risk", content: analysis.primaryRisk },
+    { label:"Recommended Deal Structure", content: analysis.dealStructure },
+    { label:"Next Move", content: analysis.nextMove },
+  ].map(s => `<div style="margin-bottom:18px">
+    <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#00A882;margin-bottom:6px">${s.label}</div>
+    <div style="font-size:13.5px;color:#333;line-height:1.8;white-space:pre-wrap">${s.content || ""}</div>
+  </div>`).join("") : "";
+
+  const revenueHtml = revenueUnlock ? `
+    <div class="section">
+      <div class="section-title">Revenue Unlock Analysis</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px">
+        <div style="padding:14px;border:1px solid #e0e0e0;border-radius:8px">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#888;margin-bottom:6px">Estimated Annual Ad Revenue</div>
+          <div style="font-size:20px;font-weight:700;color:#00A882">${revenueUnlock.revenueRangeLow} — ${revenueUnlock.revenueRangeHigh}</div>
+          <div style="font-size:11.5px;color:#666;margin-top:4px;line-height:1.5">${revenueUnlock.revenueMethodology||""}</div>
+        </div>
+        <div style="padding:14px;border:1px solid #e0e0e0;border-radius:8px">
+          <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#888;margin-bottom:6px">Estimated Impressions</div>
+          <div style="font-size:15px;font-weight:600;color:#333">${revenueUnlock.estimatedImpressions||""}</div>
+        </div>
+      </div>
+      <div style="font-size:13px;color:#444;line-height:1.7;margin-bottom:12px">${revenueUnlock.inventorySummary||""}</div>
+      <div style="font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:#888;margin-bottom:8px">Brand Fit Profile</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        ${(revenueUnlock.brandCategories||[]).map(b=>{
+          const fc={strong:"#00A882",moderate:"#CC8C00",weak:"#999"}[b.fit]||"#999";
+          return `<div style="padding:8px 10px;border:1px solid #e0e0e0;border-radius:6px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px">
+              <span style="font-size:12.5px;font-weight:600">${b.category}</span>
+              <span style="font-size:10px;font-weight:700;text-transform:uppercase;color:${fc}">${b.fit}</span>
+            </div>
+            <div style="font-size:11.5px;color:#666;line-height:1.45">${b.rationale}</div>
+          </div>`;
+        }).join("")}
+      </div>
+    </div>` : "";
+
+  const memoHtml = analysis?.executiveMemo ? `
+    <div class="section">
+      <div class="section-title">Executive Memo</div>
+      <div style="font-size:13px;color:#333;line-height:1.9;white-space:pre-wrap;background:#fafafa;padding:18px;border-radius:8px;border:1px solid #eee">${analysis.executiveMemo}</div>
+    </div>` : "";
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+  <title>BridgeIQ — ${profile.creatorName} x ${studioCtx.companyName}</title>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap');
+    * { margin:0; padding:0; box-sizing:border-box; }
+    body { font-family:'Outfit',sans-serif; color:#1a1a1a; background:#fff; padding:0; }
+    .page { max-width:780px; margin:0 auto; padding:48px 52px; }
+    .header { display:flex; justify-content:space-between; align-items:flex-start; padding-bottom:24px; border-bottom:2px solid #111; margin-bottom:28px; }
+    .logo { font-size:28px; font-weight:700; letter-spacing:-.02em; }
+    .logo span { color:#00A882; }
+    .meta { text-align:right; font-size:12px; color:#888; }
+    .partnership { font-size:22px; font-weight:700; margin-bottom:4px; color:#111; }
+    .hero { display:grid; grid-template-columns:auto 1fr; gap:28px; align-items:center; padding:24px; border:1.5px solid #e0e0e0; border-radius:12px; margin-bottom:24px; background:#fafafa; }
+    .score-big { font-size:64px; font-weight:700; color:${scoreColor}; line-height:1; font-variant-numeric:tabular-nums; }
+    .score-label { font-size:11px; color:#999; font-weight:600; text-transform:uppercase; letter-spacing:.06em; margin-top:2px; }
+    .archetype-badge { display:inline-block; padding:5px 12px; border-radius:4px; font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.05em; background:${ac.color}18; color:${ac.color}; margin-bottom:8px; }
+    .verdict { font-size:15px; color:#333; line-height:1.65; font-style:italic; }
+    .section { margin-bottom:28px; }
+    .section-title { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.08em; color:#111; border-bottom:1px solid #ddd; padding-bottom:8px; margin-bottom:14px; }
+    table { width:100%; border-collapse:collapse; }
+    .footer { margin-top:36px; padding-top:18px; border-top:1px solid #eee; display:flex; justify-content:space-between; font-size:11px; color:#bbb; }
+    @media print {
+      body { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+      .page { padding:32px 40px; }
+    }
+  </style>
+  </head><body><div class="page">
+    <div class="header">
+      <div>
+        <div class="logo">Bridge<span>IQ</span></div>
+        <div style="font-size:11px;color:#888;margin-top:3px">Creator-Legacy Partnership Intelligence</div>
+      </div>
+      <div class="meta">
+        <div style="font-weight:600;font-size:13px;color:#333;margin-bottom:2px">${profile.creatorName} × ${studioCtx.companyName}</div>
+        <div>${date}</div>
+        <div style="margin-top:3px">${studioCtx.dealType}</div>
+      </div>
+    </div>
+
+    <div class="hero">
+      <div style="text-align:center">
+        <div class="score-big">${Math.round(total)}</div>
+        <div class="score-label">Bridge Score /100</div>
+      </div>
+      <div>
+        <div class="archetype-badge">${ac.label}</div>
+        <div class="verdict">${analysis?.verdict || ac.verdict}</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px">
+          <div style="padding:10px 12px;background:#fff;border:1px solid #e8e8e8;border-radius:6px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#aaa;margin-bottom:3px">Creator</div>
+            <div style="font-size:13px;font-weight:600">${profile.creatorName}</div>
+            <div style="font-size:11.5px;color:#888">${profile.category} · ${profile.audienceSize}</div>
+          </div>
+          <div style="padding:10px 12px;background:#fff;border:1px solid #e8e8e8;border-radius:6px">
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:#aaa;margin-bottom:3px">Partner</div>
+            <div style="font-size:13px;font-weight:600">${studioCtx.companyName}</div>
+            <div style="font-size:11.5px;color:#888">${studioCtx.companyType}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Dimension Scores</div>
+      <table><tbody>${dimRows}</tbody></table>
+    </div>
+
+    <div class="section">
+      <div class="section-title">Risk Flags</div>
+      ${riskHtml}
+    </div>
+
+    <div class="section">
+      <div class="section-title">Strategic Analysis</div>
+      ${analysisHtml}
+    </div>
+
+    ${revenueHtml}
+    ${memoHtml}
+
+    <div class="footer">
+      <div>Generated by BridgeIQ · Creator-Legacy Partnership Intelligence</div>
+      <div>${profile.creatorName} × ${studioCtx.companyName} · ${date}</div>
+    </div>
+  </div>
+  <script>window.onload=()=>{window.print();}</script>
+  </body></html>`;
+
+  const w = window.open("", "_blank");
+  if (w) { w.document.write(html); w.document.close(); }
 }
 
 /* ================================================================
@@ -358,7 +579,7 @@ function StatusPill({icon,text,color=C.accent,pulse=false}){
    ================================================================ */
 
 const init = {
-  step: 0, // 0=landing, 1=url-input, 2=researching, 3=profile-review, 4=studio-select, 5=scoring, 6=dashboard
+  step: 0,
   url: "",
   creatorProfile: null,
   studioCtx: null,
@@ -367,8 +588,13 @@ const init = {
   dimNotes: null,
   result: null,
   analysis: null,
-  phase: null, // "researching" | "scoring" | "analyzing"
+  revenueUnlock: null,
+  phase: null,
   error: null,
+  compareMode: false,
+  compareSlot: "A",
+  assessmentA: null,
+  assessmentB: null,
 };
 
 function reducer(st, a) {
@@ -381,6 +607,18 @@ function reducer(st, a) {
     case "SET_SCORES": return {...st, subScores:a.scores, dimNotes:a.notes, phase:null};
     case "SET_RESULT": return {...st, result:a.v};
     case "SET_ANALYSIS": return {...st, analysis:a.v, phase:null};
+    case "SET_REVENUE": return {...st, revenueUnlock:a.v, phase:null};
+    case "START_COMPARE": return {...init, compareMode:true, compareSlot:"A", step:1};
+    case "SAVE_AS_A": return {
+      ...init,
+      compareMode:true, compareSlot:"B", step:1,
+      assessmentA:{ profile:st.creatorProfile, studioCtx:st.studioCtx, result:st.result, analysis:st.analysis, revenueUnlock:st.revenueUnlock },
+    };
+    case "SAVE_AS_B": return {
+      ...st,
+      assessmentB:{ profile:st.creatorProfile, studioCtx:st.studioCtx, result:st.result, analysis:st.analysis, revenueUnlock:st.revenueUnlock },
+      step:7,
+    };
     case "PHASE": return {...st, phase:a.v};
     case "ERROR": return {...st, error:a.v, phase:null};
     case "EDIT_STUDIO": return {...st, studioCtx:{...st.studioCtx,...a.data}};
@@ -409,6 +647,7 @@ function Landing() {
         </div>
         <div className="fade-up d2" style={{display:"flex",gap:14,justifyContent:"center",marginTop:44}}>
           <Btn onClick={()=>dispatch({type:"STEP",v:1})}>Evaluate a Creator <ArrowRight size={16}/></Btn>
+          <Btn variant="secondary" onClick={()=>dispatch({type:"START_COMPARE"})}>Compare Two Partnerships <Layers size={15}/></Btn>
         </div>
         <div className="fade-up d4" style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:14,marginTop:56}}>
           {[{n:"01",t:"Paste a creator URL",d:"YouTube, TikTok, Instagram, X, podcast"},{n:"02",t:"Select the studio context",d:"Pick a legacy partner + deal type"},{n:"03",t:"Get the bridge assessment",d:"Score, classification, risks, exec memo"}].map((x,i)=>(
@@ -447,9 +686,12 @@ function URLInput() {
   return(
     <div className="fade-up" style={{maxWidth:600,margin:"0 auto",paddingTop:60}}>
       <div style={{textAlign:"center",marginBottom:40}}>
-        <div className="mono" style={{fontSize:11.5,color:C.accent,letterSpacing:".1em",marginBottom:10}}>STEP 1</div>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:8,marginBottom:10}}>
+          <div className="mono" style={{fontSize:11.5,color:C.accent,letterSpacing:".1em"}}>{state.compareMode ? `COMPARISON — ASSESSMENT ${state.compareSlot}` : "STEP 1"}</div>
+          {state.compareMode && <Tag color={state.compareSlot==="A"?C.info:C.purple}>{state.compareSlot==="A"?"First Partnership":"Second Partnership"}</Tag>}
+        </div>
         <h2 className="serif" style={{fontSize:36,fontWeight:400,marginBottom:8}}>Drop in a creator</h2>
-        <p style={{fontSize:14.5,color:C.textSec,fontWeight:300}}>Paste any creator URL or social profile link. BridgeIQ will research them and build an intelligence profile.</p>
+        <p style={{fontSize:14.5,color:C.textSec,fontWeight:300}}>{state.compareMode ? `Set up Assessment ${state.compareSlot}. Paste a creator URL to begin.` : "Paste any creator URL or social profile link. BridgeIQ will research them and build an intelligence profile."}</p>
       </div>
 
       <Card>
@@ -670,6 +912,16 @@ function ScoringScreen() {
           const memoRaw = await callClaudeNoSearch(MEMO_SYS, buildMemoPrompt(state.creatorProfile, state.studioCtx, ds, total, arch, risks, parsed.dimensionNotes));
           const analysis = parseJSON(memoRaw);
           dispatch({type:"SET_ANALYSIS", v:analysis});
+          // Now generate revenue unlock
+          dispatch({type:"PHASE",v:"revenue"});
+          try {
+            const revenueRaw = await callClaudeNoSearch(REVENUE_SYS, buildRevenuePrompt(state.creatorProfile, state.studioCtx, total, arch));
+            const revenueUnlock = parseJSON(revenueRaw);
+            dispatch({type:"SET_REVENUE", v:revenueUnlock});
+          } catch(e3) {
+            console.error(e3);
+            dispatch({type:"SET_REVENUE", v:null});
+          }
           dispatch({type:"STEP", v:6});
         } catch(e2) {
           console.error(e2);
@@ -696,6 +948,7 @@ function ScoringScreen() {
     {label:"Classifying partnership type",icon:<Shield size={14}/>,active:state.phase==="scoring"},
     {label:"Generating risk analysis",icon:<AlertTriangle size={14}/>,active:state.phase==="scoring"},
     {label:"Writing executive memo",icon:<FileText size={14}/>,active:state.phase==="analyzing"},
+    {label:"Modeling revenue unlock",icon:<TrendingUp size={14}/>,active:state.phase==="revenue"},
   ];
 
   return(
@@ -720,7 +973,7 @@ function ScoringScreen() {
 
 function Dashboard() {
   const {state,dispatch} = useContext(Ctx);
-  const {result,analysis,creatorProfile:cp,studioCtx:sc} = state;
+  const {result,analysis,revenueUnlock,creatorProfile:cp,studioCtx:sc} = state;
   const [tab,setTab] = useState("overview");
   if (!result) return null;
   const {total,archetype:ac,dimScores,risks} = result;
@@ -729,7 +982,7 @@ function Dashboard() {
   const radarData=DIMS.map((d,i)=>{const pct=dimScores[i]?.pct;const val=typeof pct==="number"&&!isNaN(pct)?pct*100:0;return{dim:d.label.split(" ")[0],score:Math.max(0,Math.min(100,val)),fullMark:100};});
   const sevColor={critical:C.danger,high:C.warn,moderate:C.info};
   const sevIcon={critical:<XCircle size={15}/>,high:<AlertTriangle size={15}/>,moderate:<AlertCircle size={15}/>};
-  const tabs=[{id:"overview",label:"Overview"},{id:"analysis",label:"Analysis"},{id:"risks",label:`Risks (${risks.length})`},{id:"memo",label:"Executive Memo"}];
+  const tabs=[{id:"overview",label:"Overview"},{id:"analysis",label:"Analysis"},{id:"risks",label:`Risks (${risks.length})`},{id:"revenue",label:"Revenue Unlock"},{id:"memo",label:"Executive Memo"}];
 
   return(
     <div className="fade-up">
@@ -737,9 +990,19 @@ function Dashboard() {
         <div>
           <div className="mono" style={{fontSize:11,color:C.textDim,letterSpacing:".1em",marginBottom:6}}>BRIDGE ASSESSMENT</div>
           <h2 className="serif" style={{fontSize:30,fontWeight:400,marginBottom:4}}>{cp?.creatorName} <span style={{color:C.textDim,fontSize:22}}>x</span> {sc?.companyName}</h2>
-          <div style={{display:"flex",gap:8,marginTop:8}}><Tag color={ac.color}>{ac.label}</Tag></div>
+          <div style={{display:"flex",gap:8,marginTop:8}}>
+            <Tag color={ac.color}>{ac.label}</Tag>
+            {state.compareMode && <Tag color={state.compareSlot==="A"?C.info:C.purple}>Assessment {state.compareSlot}</Tag>}
+          </div>
         </div>
         <div style={{display:"flex",gap:8}}>
+          <Btn variant="secondary" size="sm" onClick={()=>generatePDF(cp, sc, result, analysis, state.revenueUnlock)}><FileText size={13}/> Export PDF</Btn>
+          {state.compareMode && state.compareSlot==="B" && state.assessmentA && (
+            <Btn size="sm" onClick={()=>dispatch({type:"SAVE_AS_B"})} style={{background:C.purple,color:"#fff"}}>View Comparison <Layers size={14}/></Btn>
+          )}
+          {state.compareMode && state.compareSlot==="A" && (
+            <Btn size="sm" onClick={()=>dispatch({type:"SAVE_AS_A"})} style={{background:C.info,color:"#fff"}}>Save as A & Set Up B <ArrowRight size={14}/></Btn>
+          )}
           <Btn variant="ghost" size="sm" onClick={()=>{dispatch({type:"STEP",v:4});dispatch({type:"SET_RESULT",v:null});dispatch({type:"SET_ANALYSIS",v:null});}}>Change Studio</Btn>
           <Btn variant="ghost" size="sm" onClick={()=>dispatch({type:"RESET"})}>New</Btn>
         </div>
@@ -820,9 +1083,355 @@ function Dashboard() {
         </div>
       )}
 
+      {tab==="revenue"&&(
+        <div className="fade-up">
+          {!state.revenueUnlock?(
+            <Card style={{textAlign:"center",padding:48}}>
+              <TrendingUp size={36} color={C.textDim} style={{margin:"0 auto 16px"}}/>
+              <div style={{fontSize:15,fontWeight:600}}>Revenue unlock data unavailable</div>
+              <div style={{fontSize:13,color:C.textDim,marginTop:6,fontWeight:300}}>Re-run the assessment to generate this analysis.</div>
+            </Card>
+          ):(
+            <>
+              {/* Header */}
+              <div style={{padding:20,borderRadius:12,border:`1px solid ${C.accent}33`,background:C.accent+"06",marginBottom:20}}>
+                <div className="mono" style={{fontSize:10,letterSpacing:".08em",color:C.textDim,marginBottom:5}}>REVENUE UNLOCK ANALYSIS</div>
+                <div style={{fontSize:14.5,color:C.textSec,lineHeight:1.8,fontWeight:300}}>{state.revenueUnlock.inventorySummary}</div>
+              </div>
+
+              {/* Revenue range hero */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:14,marginBottom:20}}>
+                <div style={{gridColumn:"1/3",padding:22,borderRadius:10,border:`1px solid ${C.accent}33`,background:C.surface}}>
+                  <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Estimated Annual Ad Revenue Range</div>
+                  <div style={{display:"flex",alignItems:"baseline",gap:10,marginBottom:8}}>
+                    <span className="mono" style={{fontSize:36,fontWeight:500,color:C.accent}}>{state.revenueUnlock.revenueRangeLow}</span>
+                    <span style={{fontSize:16,color:C.textDim}}>—</span>
+                    <span className="mono" style={{fontSize:36,fontWeight:500,color:C.accent}}>{state.revenueUnlock.revenueRangeHigh}</span>
+                  </div>
+                  <div style={{fontSize:12.5,color:C.textDim,lineHeight:1.6,fontWeight:300}}>{state.revenueUnlock.revenueMethodology}</div>
+                </div>
+                <div style={{padding:22,borderRadius:10,border:`1px solid ${C.border}`,background:C.surface,display:"flex",flexDirection:"column",justifyContent:"space-between"}}>
+                  <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Est. Total Impressions</div>
+                  <div style={{fontSize:15,fontWeight:600,color:C.text,lineHeight:1.4}}>{state.revenueUnlock.estimatedImpressions}</div>
+                </div>
+              </div>
+
+              {/* Inventory formats + context */}
+              <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:20}}>
+                <Card>
+                  <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:12}}>Net New Inventory Formats</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {(state.revenueUnlock.contentFormats||[]).map((f,i)=>(
+                      <div key={i} style={{display:"flex",gap:10,alignItems:"flex-start",padding:"10px 12px",borderRadius:7,background:C.bgSub,border:`1px solid ${C.border}`}}>
+                        <div className="mono" style={{fontSize:10,color:C.accent,marginTop:2,flexShrink:0}}>{String(i+1).padStart(2,"0")}</div>
+                        <div style={{fontSize:13,color:C.textSec,lineHeight:1.55,fontWeight:300}}>{f}</div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{marginTop:14,paddingTop:14,borderTop:`1px solid ${C.border}`,fontSize:12.5,color:C.textDim,lineHeight:1.6,fontWeight:300}}>{state.revenueUnlock.inventoryContext}</div>
+                </Card>
+
+                {/* Brand fit profile */}
+                <Card>
+                  <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:12}}>Brand Fit Profile</div>
+                  <div style={{display:"flex",flexDirection:"column",gap:8}}>
+                    {(state.revenueUnlock.brandCategories||[]).map((b,i)=>{
+                      const fitColor={strong:C.accent,moderate:C.warn,weak:C.textDim}[b.fit]||C.textDim;
+                      return(
+                        <div key={i} style={{padding:"10px 12px",borderRadius:7,background:C.bgSub,border:`1px solid ${C.border}`}}>
+                          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:4}}>
+                            <span style={{fontSize:13,fontWeight:600,color:C.text}}>{b.category}</span>
+                            <span className="mono" style={{fontSize:9.5,color:fitColor,background:fitColor+"14",padding:"2px 8px",borderRadius:3,textTransform:"uppercase",letterSpacing:".05em"}}>{b.fit}</span>
+                          </div>
+                          <div style={{fontSize:12,color:C.textSec,lineHeight:1.5,fontWeight:300}}>{b.rationale}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </Card>
+              </div>
+
+              {/* Agency angle */}
+              <Card style={{borderColor:C.info+"33"}}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:10,color:C.info}}>
+                  <Building size={14}/>
+                  <span className="mono" style={{fontSize:10.5,letterSpacing:".06em",textTransform:"uppercase"}}>Agency Buyer Angle</span>
+                </div>
+                <div style={{fontSize:14,color:C.textSec,lineHeight:1.8,fontWeight:300}}>{state.revenueUnlock.agencyAngle}</div>
+              </Card>
+            </>
+          )}
+        </div>
+      )}
+
       {tab==="memo"&&(
         <div className="fade-up">
           {analysis?.executiveMemo?(<><div style={{marginBottom:14}}><div className="mono" style={{fontSize:11,color:C.textDim,letterSpacing:".08em"}}>EXECUTIVE MEMO</div><div style={{fontSize:13.5,color:C.textSec,fontWeight:300,marginTop:2}}>Formatted for forwarding to senior leadership</div></div><CopyBlock text={analysis.executiveMemo}/></>):(<Card style={{textAlign:"center",padding:48}}><FileText size={36} color={C.textDim} style={{margin:"0 auto 16px"}}/><div style={{fontSize:15,fontWeight:600}}>Memo not available</div></Card>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================
+   COMPARISON DASHBOARD
+   ================================================================ */
+
+function ComparisonDashboard() {
+  const {state,dispatch} = useContext(Ctx);
+  const {assessmentA:A, assessmentB:B} = state;
+  const [tab, setTab] = useState("overview");
+  if (!A || !B) return null;
+
+  const sevColor={critical:C.danger,high:C.warn,moderate:C.info};
+  const sevIcon={critical:<XCircle size={14}/>,high:<AlertTriangle size={14}/>,moderate:<AlertCircle size={14}/>};
+
+  // Radar overlay data
+  const radarData = DIMS.map((d,i) => ({
+    dim: d.label.split(" ")[0],
+    A: Math.round((A.result.dimScores[i]?.pct||0)*100),
+    B: Math.round((B.result.dimScores[i]?.pct||0)*100),
+    fullMark: 100,
+  }));
+
+  // Dimension winner table
+  const dimComparison = DIMS.map((d,i) => {
+    const sa = A.result.dimScores[i]?.scaled||0;
+    const sb = B.result.dimScores[i]?.scaled||0;
+    const winner = sa > sb ? "A" : sb > sa ? "B" : "tie";
+    return { dim:d, sa, sb, max:d.max, winner };
+  });
+
+  const aWins = dimComparison.filter(x=>x.winner==="A").length;
+  const bWins = dimComparison.filter(x=>x.winner==="B").length;
+
+  const ScoreCard = ({label, assess, color}) => {
+    const {total, archetype:ac} = assess.result;
+    const scoreColor = total>=75?C.accent:total>=55?C.warn:total>=40?C.orange:C.danger;
+    return (
+      <div style={{flex:1,padding:24,borderRadius:12,border:`2px solid ${color}44`,background:C.surface}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:16}}>
+          <Tag color={color}>Assessment {label}</Tag>
+          <Tag color={ac.color}>{ac.label}</Tag>
+        </div>
+        <div style={{fontSize:13,fontWeight:600,marginBottom:2}}>{assess.profile.creatorName}</div>
+        <div style={{fontSize:12,color:C.textDim,marginBottom:14}}>× {assess.studioCtx.companyName} · {assess.studioCtx.dealType}</div>
+        <div style={{display:"flex",alignItems:"baseline",gap:6}}>
+          <span className="mono" style={{fontSize:52,fontWeight:500,color:scoreColor,lineHeight:1}}>{Math.round(total)}</span>
+          <span className="mono" style={{fontSize:13,color:C.textDim}}>/100</span>
+        </div>
+        <div style={{marginTop:10,fontSize:12.5,color:C.textSec,lineHeight:1.65,fontStyle:"italic",fontWeight:300}}>{assess.analysis?.verdict||ac.verdict}</div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="fade-up">
+      {/* Header */}
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:28}}>
+        <div>
+          <div className="mono" style={{fontSize:11,color:C.accent,letterSpacing:".1em",marginBottom:6}}>PARTNERSHIP COMPARISON</div>
+          <h2 className="serif" style={{fontSize:28,fontWeight:400}}>Assessment A vs. Assessment B</h2>
+        </div>
+        <div style={{display:"flex",gap:8}}>
+          <Btn variant="secondary" size="sm" onClick={()=>dispatch({type:"RESET"})}>New Assessment</Btn>
+        </div>
+      </div>
+
+      {/* Score cards */}
+      <div style={{display:"flex",gap:16,marginBottom:20}}>
+        <ScoreCard label="A" assess={A} color={C.info}/>
+        <div style={{display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:6,padding:"0 8px"}}>
+          <div style={{fontSize:12,color:C.textDim,fontWeight:600}}>vs.</div>
+          <div style={{width:1,flex:1,background:C.border}}/>
+        </div>
+        <ScoreCard label="B" assess={B} color={C.purple}/>
+      </div>
+
+      {/* Dimension winner summary */}
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr",gap:12,marginBottom:20}}>
+        {[
+          {label:"A Wins", value:aWins, color:C.info, sub:"dimensions"},
+          {label:"Tied", value:dimComparison.filter(x=>x.winner==="tie").length, color:C.textDim, sub:"dimensions"},
+          {label:"B Wins", value:bWins, color:C.purple, sub:"dimensions"},
+        ].map((s,i)=>(
+          <div key={i} style={{padding:16,borderRadius:10,border:`1px solid ${C.border}`,background:C.surface,textAlign:"center"}}>
+            <div className="mono" style={{fontSize:32,fontWeight:500,color:s.color,lineHeight:1}}>{s.value}</div>
+            <div style={{fontSize:11,color:C.textDim,marginTop:4}}>{s.label}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Tabs */}
+      <div style={{display:"flex",gap:3,marginBottom:20,borderBottom:`1px solid ${C.border}`}}>
+        {[{id:"overview",label:"Side-by-Side"},{id:"dimensions",label:"Dimension Breakdown"},{id:"risks",label:"Risk Comparison"},{id:"memos",label:"Both Memos"}].map(t=>(
+          <button key={t.id} onClick={()=>setTab(t.id)} style={{padding:"10px 18px",border:"none",borderBottom:`2px solid ${tab===t.id?C.accent:"transparent"}`,background:"transparent",color:tab===t.id?C.text:C.textDim,fontSize:13,fontWeight:600,cursor:"pointer",fontFamily:"'Outfit'",transition:"all .2s",marginBottom:-1}}>{t.label}</button>
+        ))}
+      </div>
+
+      {tab==="overview" && (
+        <div className="fade-up">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,marginBottom:20}}>
+            {/* Radar overlay */}
+            <Card>
+              <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Capability Radar</div>
+              <div style={{display:"flex",gap:12,marginBottom:12}}>
+                <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.info}}><div style={{width:12,height:3,borderRadius:2,background:C.info}}/> Assessment A</div>
+                <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.purple}}><div style={{width:12,height:3,borderRadius:2,background:C.purple}}/> Assessment B</div>
+              </div>
+              <div style={{height:280}}>
+                <ResponsiveContainer>
+                  <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
+                    <PolarGrid stroke={C.borderHi} gridType="polygon"/>
+                    <PolarAngleAxis dataKey="dim" tick={{fill:C.textSec,fontSize:10,fontFamily:"'Outfit'"}}/>
+                    <PolarRadiusAxis domain={[0,100]} tick={false} axisLine={false}/>
+                    <Radar name="A" dataKey="A" stroke={C.info} fill={C.info} fillOpacity={0.15} strokeWidth={2} dot={{r:3,fill:C.info,strokeWidth:0}}/>
+                    <Radar name="B" dataKey="B" stroke={C.purple} fill={C.purple} fillOpacity={0.15} strokeWidth={2} dot={{r:3,fill:C.purple,strokeWidth:0}}/>
+                  </RadarChart>
+                </ResponsiveContainer>
+              </div>
+            </Card>
+
+            {/* Score comparison + revenue */}
+            <div style={{display:"flex",flexDirection:"column",gap:14}}>
+              <Card>
+                <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:12}}>Bridge Score</div>
+                {[{label:"A",assess:A,color:C.info},{label:"B",assess:B,color:C.purple}].map(({label,assess,color})=>(
+                  <div key={label} style={{marginBottom:12}}>
+                    <div style={{display:"flex",justifyContent:"space-between",marginBottom:5}}>
+                      <span style={{fontSize:12,fontWeight:600,color}}>{label}: {assess.profile.creatorName} × {assess.studioCtx.companyName}</span>
+                      <span className="mono" style={{fontSize:13,fontWeight:600,color}}>{Math.round(assess.result.total)}/100</span>
+                    </div>
+                    <div style={{height:7,borderRadius:4,background:C.border}}>
+                      <div style={{height:7,borderRadius:4,background:color,width:`${assess.result.total}%`,transition:"width .8s ease-out"}}/>
+                    </div>
+                  </div>
+                ))}
+              </Card>
+
+              {(A.revenueUnlock||B.revenueUnlock) && (
+                <Card>
+                  <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:12}}>Revenue Unlock Comparison</div>
+                  {[{label:"A",assess:A,color:C.info},{label:"B",assess:B,color:C.purple}].map(({label,assess,color})=>(
+                    assess.revenueUnlock ? (
+                      <div key={label} style={{marginBottom:10,padding:"10px 12px",borderRadius:7,background:C.bgSub,border:`1px solid ${C.border}`}}>
+                        <div style={{fontSize:11,fontWeight:600,color,marginBottom:3}}>Assessment {label}</div>
+                        <div className="mono" style={{fontSize:15,fontWeight:500,color:C.accent}}>{assess.revenueUnlock.revenueRangeLow} — {assess.revenueUnlock.revenueRangeHigh}</div>
+                        <div style={{fontSize:11.5,color:C.textDim,marginTop:2}}>{assess.revenueUnlock.estimatedImpressions}</div>
+                      </div>
+                    ) : null
+                  ))}
+                </Card>
+              )}
+
+              <Card style={{borderColor:A.result.total > B.result.total ? C.info+"44" : C.purple+"44"}}>
+                <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:8}}>Recommended Partnership</div>
+                {A.result.total === B.result.total ? (
+                  <div style={{fontSize:14,color:C.textSec,lineHeight:1.6,fontWeight:300}}>Both partnerships score equally. Review dimension breakdown and risks to differentiate.</div>
+                ) : (
+                  <>
+                    <div style={{fontSize:15,fontWeight:700,color:A.result.total>B.result.total?C.info:C.purple,marginBottom:6}}>
+                      Assessment {A.result.total>B.result.total?"A":"B"} scores higher
+                    </div>
+                    <div style={{fontSize:13,color:C.textSec,lineHeight:1.65,fontWeight:300}}>
+                      {A.result.total>B.result.total
+                        ? `${A.profile.creatorName} × ${A.studioCtx.companyName} (${Math.round(A.result.total)}) outscores ${B.profile.creatorName} × ${B.studioCtx.companyName} (${Math.round(B.result.total)}) by ${Math.round(A.result.total-B.result.total)} points.`
+                        : `${B.profile.creatorName} × ${B.studioCtx.companyName} (${Math.round(B.result.total)}) outscores ${A.profile.creatorName} × ${A.studioCtx.companyName} (${Math.round(A.result.total)}) by ${Math.round(B.result.total-A.result.total)} points.`
+                      }
+                    </div>
+                  </>
+                )}
+              </Card>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {tab==="dimensions" && (
+        <div className="fade-up">
+          <div style={{display:"flex",flexDirection:"column",gap:8}}>
+            {dimComparison.map(({dim,sa,sb,max,winner},i)=>{
+              const pctA=sa/max; const pctB=sb/max;
+              const colorA=pctA>=.7?C.info:pctA>=.5?C.info+"99":C.info+"55";
+              const colorB=pctB>=.7?C.purple:pctB>=.5?C.purple+"99":C.purple+"55";
+              return (
+                <div key={dim.key} style={{padding:14,borderRadius:10,border:`1px solid ${winner==="A"?C.info+"33":winner==="B"?C.purple+"33":C.border}`,background:C.surface}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                    <div style={{fontSize:13,fontWeight:600}}>{dim.label}</div>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      {winner!=="tie" && <Tag color={winner==="A"?C.info:C.purple}>{winner==="A"?"A Wins":"B Wins"}</Tag>}
+                      {winner==="tie" && <Tag color={C.textDim}>Tied</Tag>}
+                    </div>
+                  </div>
+                  <div style={{display:"grid",gridTemplateColumns:"1fr auto 1fr",gap:10,alignItems:"center"}}>
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{fontSize:11,color:C.info,fontWeight:500}}>A: {A.profile.creatorName.split(" ")[0]}</span>
+                        <span className="mono" style={{fontSize:12,fontWeight:600,color:C.info}}>{sa.toFixed(1)}/{max}</span>
+                      </div>
+                      <div style={{height:6,borderRadius:3,background:C.border}}>
+                        <div style={{height:6,borderRadius:3,background:colorA,width:`${pctA*100}%`}}/>
+                      </div>
+                    </div>
+                    <div style={{fontSize:11,color:C.textDim,textAlign:"center"}}>vs</div>
+                    <div>
+                      <div style={{display:"flex",justifyContent:"space-between",marginBottom:4}}>
+                        <span style={{fontSize:11,color:C.purple,fontWeight:500}}>B: {B.profile.creatorName.split(" ")[0]}</span>
+                        <span className="mono" style={{fontSize:12,fontWeight:600,color:C.purple}}>{sb.toFixed(1)}/{max}</span>
+                      </div>
+                      <div style={{height:6,borderRadius:3,background:C.border}}>
+                        <div style={{height:6,borderRadius:3,background:colorB,width:`${pctB*100}%`}}/>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {tab==="risks" && (
+        <div className="fade-up">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18}}>
+            {[{label:"A",assess:A,color:C.info},{label:"B",assess:B,color:C.purple}].map(({label,assess,color})=>(
+              <div key={label}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+                  <Tag color={color}>Assessment {label}</Tag>
+                  <span style={{fontSize:13,color:C.textSec}}>{assess.profile.creatorName} × {assess.studioCtx.companyName}</span>
+                </div>
+                {assess.result.risks.length===0 ? (
+                  <Card style={{textAlign:"center",padding:32}}><CheckCircle2 size={28} color={C.accent} style={{margin:"0 auto 10px"}}/><div style={{fontSize:13,fontWeight:600}}>No risks flagged</div></Card>
+                ) : assess.result.risks.map((r,i)=>(
+                  <Card key={i} style={{marginBottom:10,borderColor:sevColor[r.severity]+"33"}}>
+                    <div style={{display:"flex",gap:8,alignItems:"flex-start"}}>
+                      <div style={{color:sevColor[r.severity],marginTop:1}}>{sevIcon[r.severity]}</div>
+                      <div>
+                        <div style={{fontSize:12.5,fontWeight:600,color:sevColor[r.severity],marginBottom:4}}>{r.title}</div>
+                        <div style={{fontSize:12,color:C.textSec,lineHeight:1.6,fontWeight:300}}>{r.text}</div>
+                      </div>
+                    </div>
+                  </Card>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {tab==="memos" && (
+        <div className="fade-up">
+          <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18}}>
+            {[{label:"A",assess:A,color:C.info},{label:"B",assess:B,color:C.purple}].map(({label,assess,color})=>(
+              <div key={label}>
+                <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:12}}>
+                  <Tag color={color}>Assessment {label}</Tag>
+                  <Btn variant="ghost" size="sm" onClick={()=>generatePDF(assess.profile,assess.studioCtx,assess.result,assess.analysis,assess.revenueUnlock)}><FileText size={12}/> Export PDF</Btn>
+                </div>
+                {assess.analysis?.executiveMemo ? <CopyBlock text={assess.analysis.executiveMemo}/> : <Card style={{textAlign:"center",padding:32,color:C.textDim}}>Memo unavailable</Card>}
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -837,7 +1446,7 @@ export default function BridgeIQ() {
   const [state, dispatch] = useReducer(reducer, init);
   const pages = {
     0:<Landing/>, 1:<URLInput/>, 2:<ResearchingScreen/>,
-    3:<ProfileReview/>, 4:<StudioSelect/>, 5:<ScoringScreen/>, 6:<Dashboard/>,
+    3:<ProfileReview/>, 4:<StudioSelect/>, 5:<ScoringScreen/>, 6:<Dashboard/>, 7:<ComparisonDashboard/>,
   };
 
   return(
@@ -850,7 +1459,7 @@ export default function BridgeIQ() {
             <Btn variant="ghost" size="sm" onClick={()=>dispatch({type:"RESET"})}>Reset</Btn>
           </div>
         )}
-        <div style={{maxWidth:state.step===6?1000:state.step===3?860:700,margin:"0 auto",padding:state.step===0?0:"28px 24px 60px"}}>
+        <div style={{maxWidth:state.step===6||state.step===7?1100:state.step===3?860:700,margin:"0 auto",padding:state.step===0?0:"28px 24px 60px"}}>
           {pages[state.step]}
         </div>
       </div>
