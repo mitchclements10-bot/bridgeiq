@@ -290,22 +290,50 @@ Return this exact JSON:
    ================================================================ */
 
 async function callClaude(system, userMsg) {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4000,
-      system,
-      tools: [{ type: "web_search_20250305", name: "web_search" }],
-      messages: [{ role: "user", content: userMsg }]
-    })
-  });
-  const data = await resp.json();
-  if (data.error) throw new Error(data.error.message || "API error");
-  const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
-  if (!text) throw new Error("Empty response from API");
-  return text;
+  const messages = [{ role: "user", content: userMsg }];
+  let finalText = "";
+
+  // Agentic loop — handles web search tool use turns
+  for (let i = 0; i < 8; i++) {
+    const resp = await fetch("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-sonnet-4-6",
+        max_tokens: 4000,
+        system,
+        tools: [{ type: "web_search_20250305", name: "web_search" }],
+        messages,
+      })
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error.message || "API error");
+
+    // Collect any text from this turn
+    const textBlocks = data.content?.filter(b => b.type === "text") || [];
+    if (textBlocks.length) finalText = textBlocks.map(b => b.text).join("");
+
+    // If done, return
+    if (data.stop_reason === "end_turn") break;
+
+    // If model used tools, send results back and continue
+    const toolUseBlocks = data.content?.filter(b => b.type === "tool_use") || [];
+    if (toolUseBlocks.length === 0) break;
+
+    // Add assistant turn with tool use
+    messages.push({ role: "assistant", content: data.content });
+
+    // Add tool results (web search results are handled server-side; send empty result to continue)
+    const toolResults = toolUseBlocks.map(b => ({
+      type: "tool_result",
+      tool_use_id: b.id,
+      content: b.type === "web_search" ? [] : [],
+    }));
+    messages.push({ role: "user", content: toolResults });
+  }
+
+  if (!finalText) throw new Error("No response from API — check your connection and try again.");
+  return finalText;
 }
 
 async function callClaudeNoSearch(system, userMsg) {
