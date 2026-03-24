@@ -1,6 +1,10 @@
 {
-  "framework": "vite",
-  "rewrites": [
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
-  ]
+  "functions": {
+    "api/proxy.js": {
+      "maxDuration": 60
+    },
+    "api/research.js": {
+      "maxDuration": 60
+    }
+  }
 }
