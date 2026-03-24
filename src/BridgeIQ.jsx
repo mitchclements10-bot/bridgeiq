@@ -289,12 +289,26 @@ Return this exact JSON:
    API HELPER
    ================================================================ */
 
+const IS_DEPLOYED = typeof window !== "undefined" && !window.location.hostname.includes("claude.ai");
+const PROXY_URL = "/api/proxy";
+const RESEARCH_URL = "/api/research";
+
 async function callClaude(system, userMsg) {
+  // Research call — uses dedicated endpoint with server-side agentic web search loop
+  if (IS_DEPLOYED) {
+    const resp = await fetch(RESEARCH_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ system, userMsg }),
+    });
+    const data = await resp.json();
+    if (data.error) throw new Error(data.error);
+    return data.text;
+  }
+  // Claude artifact env — web search works natively
   const messages = [{ role: "user", content: userMsg }];
   let finalText = "";
-
-  // Agentic loop — handles web search tool use turns
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 10; i++) {
     const resp = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -308,48 +322,36 @@ async function callClaude(system, userMsg) {
     });
     const data = await resp.json();
     if (data.error) throw new Error(data.error.message || "API error");
-
-    // Collect any text from this turn
-    const textBlocks = data.content?.filter(b => b.type === "text") || [];
+    const textBlocks = (data.content || []).filter(b => b.type === "text");
     if (textBlocks.length) finalText = textBlocks.map(b => b.text).join("");
-
-    // If done, return
     if (data.stop_reason === "end_turn") break;
-
-    // If model used tools, send results back and continue
-    const toolUseBlocks = data.content?.filter(b => b.type === "tool_use") || [];
-    if (toolUseBlocks.length === 0) break;
-
-    // Add assistant turn with tool use
+    const toolUseBlocks = (data.content || []).filter(b => b.type === "tool_use");
+    if (!toolUseBlocks.length) break;
     messages.push({ role: "assistant", content: data.content });
-
-    // Add tool results (web search results are handled server-side; send empty result to continue)
-    const toolResults = toolUseBlocks.map(b => ({
-      type: "tool_result",
-      tool_use_id: b.id,
-      content: b.type === "web_search" ? [] : [],
-    }));
-    messages.push({ role: "user", content: toolResults });
+    const serverResults = (data.content || []).filter(b => b.type === "tool_result");
+    if (serverResults.length) {
+      messages.push({ role: "user", content: serverResults });
+    } else {
+      messages.push({ role: "user", content: toolUseBlocks.map(b => ({ type: "tool_result", tool_use_id: b.id, content: "" })) });
+    }
   }
-
-  if (!finalText) throw new Error("No response from API — check your connection and try again.");
+  if (!finalText) throw new Error("No response from API");
   return finalText;
 }
 
 async function callClaudeNoSearch(system, userMsg) {
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const url = IS_DEPLOYED ? PROXY_URL : "https://api.anthropic.com/v1/messages";
+  const body = IS_DEPLOYED
+    ? JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 4000, system, messages: [{ role: "user", content: userMsg }] })
+    : JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 4000, system, messages: [{ role: "user", content: userMsg }] });
+  const resp = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-6",
-      max_tokens: 4000,
-      system,
-      messages: [{ role: "user", content: userMsg }]
-    })
+    body,
   });
   const data = await resp.json();
   if (data.error) throw new Error(data.error.message || "API error");
-  const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  const text = (data.content || []).filter(b => b.type === "text").map(b => b.text).join("");
   if (!text) throw new Error("Empty response from API");
   return text;
 }
