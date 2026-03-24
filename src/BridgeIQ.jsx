@@ -294,7 +294,7 @@ async function callClaude(system, userMsg) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 4000,
       system,
       tools: [{ type: "web_search_20250305", name: "web_search" }],
@@ -302,7 +302,9 @@ async function callClaude(system, userMsg) {
     })
   });
   const data = await resp.json();
+  if (data.error) throw new Error(data.error.message || "API error");
   const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  if (!text) throw new Error("Empty response from API");
   return text;
 }
 
@@ -311,14 +313,16 @@ async function callClaudeNoSearch(system, userMsg) {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       max_tokens: 4000,
       system,
       messages: [{ role: "user", content: userMsg }]
     })
   });
   const data = await resp.json();
+  if (data.error) throw new Error(data.error.message || "API error");
   const text = data.content?.filter(b => b.type === "text").map(b => b.text).join("") || "";
+  if (!text) throw new Error("Empty response from API");
   return text;
 }
 
@@ -568,6 +572,111 @@ function CopyBlock({text}){
   const[copied,setCopied]=useState(false);
   const copy=()=>{navigator.clipboard.writeText(text).then(()=>{setCopied(true);setTimeout(()=>setCopied(false),2000)});};
   return(<div style={{position:"relative"}}><button onClick={copy} style={{position:"absolute",top:12,right:12,background:C.surfaceAlt,border:`1px solid ${C.border}`,borderRadius:6,padding:"6px 12px",cursor:"pointer",display:"flex",alignItems:"center",gap:5,color:copied?C.accent:C.textSec,fontSize:12,fontFamily:"'Outfit'",zIndex:1}}>{copied?<><Check size={13}/> Copied</>:<><Copy size={13}/> Copy</>}</button><div style={{background:C.bgSub,border:`1px solid ${C.border}`,borderRadius:10,padding:20,fontSize:13.5,color:C.textSec,lineHeight:1.85,whiteSpace:"pre-wrap",fontWeight:300,maxHeight:520,overflow:"auto"}}>{text}</div></div>);
+}
+
+function CustomRadar({ data, size = 270 }) {
+  // data: [{label, value (0-100)}]
+  const cx = size / 2, cy = size / 2;
+  const maxR = size * 0.36;
+  const n = data.length;
+  const rings = [0.25, 0.5, 0.75, 1.0];
+  const angleOf = i => (Math.PI * 2 * i / n) - Math.PI / 2;
+  const pt = (i, r) => {
+    const a = angleOf(i);
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  };
+  const polyPoints = (vals) => vals.map((v, i) => pt(i, (v / 100) * maxR).join(",")).join(" ");
+  const gridPoly = (frac) => Array.from({length:n}, (_,i) => pt(i, maxR * frac).join(",")).join(" ");
+  const scorePts = data.map(d => Math.max(0, Math.min(100, d.value)));
+
+  return (
+    <svg width={size} height={size} style={{display:"block",margin:"0 auto"}}>
+      {/* Grid rings */}
+      {rings.map((r, ri) => (
+        <polygon key={ri} points={gridPoly(r)} fill="none" stroke={C.borderHi} strokeWidth={1} />
+      ))}
+      {/* Axis lines */}
+      {data.map((_, i) => {
+        const [x, y] = pt(i, maxR);
+        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke={C.border} strokeWidth={1} />;
+      })}
+      {/* Filled polygon */}
+      <polygon
+        points={polyPoints(scorePts)}
+        fill={C.accent}
+        fillOpacity={0.35}
+        stroke={C.accent}
+        strokeWidth={2}
+        strokeLinejoin="round"
+      />
+      {/* Dots */}
+      {scorePts.map((v, i) => {
+        const [x, y] = pt(i, (v / 100) * maxR);
+        return <circle key={i} cx={x} cy={y} r={4} fill={C.accent} stroke={C.bg} strokeWidth={1.5} />;
+      })}
+      {/* Labels */}
+      {data.map((d, i) => {
+        const a = angleOf(i);
+        const labelR = maxR + 18;
+        const lx = cx + Math.cos(a) * labelR;
+        const ly = cy + Math.sin(a) * labelR;
+        const anchor = lx < cx - 4 ? "end" : lx > cx + 4 ? "start" : "middle";
+        return (
+          <text key={i} x={lx} y={ly} textAnchor={anchor} dominantBaseline="central"
+            style={{fontSize:9.5, fill:C.textSec, fontFamily:"'Outfit',sans-serif", fontWeight:500}}>
+            {d.label}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+function CustomRadarDual({ dataA, dataB, size = 280 }) {
+  const cx = size / 2, cy = size / 2;
+  const maxR = size * 0.36;
+  const n = dataA.length;
+  const rings = [0.25, 0.5, 0.75, 1.0];
+  const angleOf = i => (Math.PI * 2 * i / n) - Math.PI / 2;
+  const pt = (i, r) => {
+    const a = angleOf(i);
+    return [cx + Math.cos(a) * r, cy + Math.sin(a) * r];
+  };
+  const polyPoints = (vals) => vals.map((v, i) => pt(i, (v / 100) * maxR).join(",")).join(" ");
+  const gridPoly = (frac) => Array.from({length:n}, (_,i) => pt(i, maxR * frac).join(",")).join(" ");
+  const ptsA = dataA.map(d => Math.max(0, Math.min(100, d)));
+  const ptsB = dataB.map(d => Math.max(0, Math.min(100, d)));
+  const labels = DIMS.map(d => d.label.split(" ")[0]);
+
+  return (
+    <svg width={size} height={size} style={{display:"block",margin:"0 auto"}}>
+      {rings.map((r, ri) => (
+        <polygon key={ri} points={gridPoly(r)} fill="none" stroke={C.borderHi} strokeWidth={1} />
+      ))}
+      {labels.map((_, i) => {
+        const [x, y] = pt(i, maxR);
+        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke={C.border} strokeWidth={1} />;
+      })}
+      {/* B behind A */}
+      <polygon points={polyPoints(ptsB)} fill={C.purple} fillOpacity={0.25} stroke={C.purple} strokeWidth={2} strokeLinejoin="round"/>
+      <polygon points={polyPoints(ptsA)} fill={C.info} fillOpacity={0.25} stroke={C.info} strokeWidth={2} strokeLinejoin="round"/>
+      {ptsA.map((v, i) => { const [x,y]=pt(i,(v/100)*maxR); return <circle key={i} cx={x} cy={y} r={3} fill={C.info} stroke={C.bg} strokeWidth={1}/>; })}
+      {ptsB.map((v, i) => { const [x,y]=pt(i,(v/100)*maxR); return <circle key={i} cx={x} cy={y} r={3} fill={C.purple} stroke={C.bg} strokeWidth={1}/>; })}
+      {labels.map((label, i) => {
+        const a = angleOf(i);
+        const labelR = maxR + 18;
+        const lx = cx + Math.cos(a) * labelR;
+        const ly = cy + Math.sin(a) * labelR;
+        const anchor = lx < cx - 4 ? "end" : lx > cx + 4 ? "start" : "middle";
+        return (
+          <text key={i} x={lx} y={ly} textAnchor={anchor} dominantBaseline="central"
+            style={{fontSize:9.5, fill:C.textSec, fontFamily:"'Outfit',sans-serif", fontWeight:500}}>
+            {label}
+          </text>
+        );
+      })}
+    </svg>
+  );
 }
 
 function StatusPill({icon,text,color=C.accent,pulse=false}){
@@ -1038,7 +1147,7 @@ function Dashboard() {
           <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:18,marginBottom:22}}>
             <Card>
               <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Dimension Radar</div>
-              <div style={{height:270}}><ResponsiveContainer><RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}><PolarGrid stroke={C.borderHi} gridType="polygon"/><PolarAngleAxis dataKey="dim" tick={{fill:C.textSec,fontSize:10,fontFamily:"'Outfit'"}}/><PolarRadiusAxis domain={[0,100]} tick={false} axisLine={false}/><Radar name="Score" dataKey="score" stroke={C.accent} fill={C.accent} fillOpacity={0.25} strokeWidth={2.5} dot={{r:4,fill:C.accent,strokeWidth:0}}/></RadarChart></ResponsiveContainer></div>
+              <CustomRadar size={270} data={DIMS.map((d,i)=>({label:d.label.split(" ")[0],value:(dimScores[i]?.pct||0)*100}))}/>
             </Card>
             <Card>
               <div className="mono" style={{fontSize:10.5,color:C.textDim,letterSpacing:".06em",textTransform:"uppercase",marginBottom:10}}>Dimension Scores</div>
@@ -1280,15 +1389,11 @@ function ComparisonDashboard() {
                 <div style={{display:"flex",alignItems:"center",gap:5,fontSize:11,color:C.purple}}><div style={{width:12,height:3,borderRadius:2,background:C.purple}}/> Assessment B</div>
               </div>
               <div style={{height:280}}>
-                <ResponsiveContainer>
-                  <RadarChart cx="50%" cy="50%" outerRadius="70%" data={radarData}>
-                    <PolarGrid stroke={C.borderHi} gridType="polygon"/>
-                    <PolarAngleAxis dataKey="dim" tick={{fill:C.textSec,fontSize:10,fontFamily:"'Outfit'"}}/>
-                    <PolarRadiusAxis domain={[0,100]} tick={false} axisLine={false}/>
-                    <Radar name="A" dataKey="A" stroke={C.info} fill={C.info} fillOpacity={0.15} strokeWidth={2} dot={{r:3,fill:C.info,strokeWidth:0}}/>
-                    <Radar name="B" dataKey="B" stroke={C.purple} fill={C.purple} fillOpacity={0.15} strokeWidth={2} dot={{r:3,fill:C.purple,strokeWidth:0}}/>
-                  </RadarChart>
-                </ResponsiveContainer>
+                <CustomRadarDual
+                  size={280}
+                  dataA={DIMS.map((_,i)=>(A.result.dimScores[i]?.pct||0)*100)}
+                  dataB={DIMS.map((_,i)=>(B.result.dimScores[i]?.pct||0)*100)}
+                />
               </div>
             </Card>
 
